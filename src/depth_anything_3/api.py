@@ -96,7 +96,6 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         # Device management (set by user)
         self.device = None
 
-    @torch.inference_mode()
     def forward(
         self,
         image: torch.Tensor,
@@ -124,11 +123,10 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         """
         # Determine optimal autocast dtype
         autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        with torch.no_grad():
-            with torch.autocast(device_type=image.device.type, dtype=autocast_dtype):
-                return self.model(
-                    image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
-                )
+        with torch.autocast(device_type=image.device.type, dtype=autocast_dtype):
+            return self.model(
+                image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
+            )
 
     def inference(
         self,

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Modifications made by Omoruyi Atekha for Toyota Research Institute (TRI) 2025
+
 from __future__ import annotations
 
 import torch
@@ -176,6 +178,7 @@ class DepthAnything3Net(nn.Module):
         output.depth, _ = set_sky_regions_to_max_depth(
             output.depth, None, non_sky_mask, max_depth=non_sky_max
         )
+        output['sky_mask'] = output.sky
         return output
 
     def _process_ray_pose_estimation(
@@ -188,6 +191,7 @@ class DepthAnything3Net(nn.Module):
                 output.ray_conf,
                 output.ray.shape[-3],
                 output.ray.shape[-2],
+                training=True,
             )
             pred_extrinsic = affine_inverse(pred_extrinsic) # w2c -> c2w
             pred_extrinsic = pred_extrinsic[:, :, :3, :]
@@ -196,8 +200,8 @@ class DepthAnything3Net(nn.Module):
             pred_intrinsic[:, :, 1, 1] = pred_focal_lengths[:, :, 1] / 2 * height
             pred_intrinsic[:, :, 0, 2] = pred_principal_points[:, :, 0] * width * 0.5
             pred_intrinsic[:, :, 1, 2] = pred_principal_points[:, :, 1] * height * 0.5
-            del output.ray
-            del output.ray_conf
+            # del output.ray
+            # del output.ray_conf
             output.extrinsics = pred_extrinsic
             output.intrinsics = pred_intrinsic
         return output
@@ -358,10 +362,12 @@ class NestedDepthAnything3Net(nn.Module):
         Returns:
             Dictionary containing aligned depth predictions and camera parameters
         """
+        use_ray_pose = False
         # Get predictions from both branches
         output = self.da3(
-            x, extrinsics, intrinsics, export_feat_layers=export_feat_layers, infer_gs=infer_gs, use_ray_pose=use_ray_pose, ref_view_strategy=ref_view_strategy
+            x, extrinsics, intrinsics, export_feat_layers=export_feat_layers, infer_gs=infer_gs, use_ray_pose=False, ref_view_strategy=ref_view_strategy
         )
+        output.depth_unscaled = output.depth.clone()
         metric_output = self.da3_metric(x)
 
         # Apply metric scaling and alignment
@@ -407,14 +413,23 @@ class NestedDepthAnything3Net(nn.Module):
         valid_metric_depth = metric_output.depth[align_mask]
         scale_factor = least_squares_scale_scalar(valid_metric_depth, valid_depth)
 
-        # Apply scaling to depth and extrinsics
-        output.depth *= scale_factor
-        output.extrinsics[:, :, :3, 3] *= scale_factor
+        # FIX: Use completely out-of-place operations
+        output.depth = output.depth * scale_factor
+        
+        # Create new extrinsics tensor with scaled translation
+        new_extrinsics = output.extrinsics.clone()
+        translation = new_extrinsics[:, :, :3, 3] * scale_factor
+        # Build completely new tensor instead of in-place modification
+        new_extrinsics = torch.cat([
+            new_extrinsics[:, :, :3, :3],  # Rotation part (unchanged)
+            translation.unsqueeze(-1)       # Scaled translation
+        ], dim=-1)
+        output.extrinsics = new_extrinsics
+        
         output.is_metric = 1
         output.scale_factor = scale_factor.item()
-
+        output['sky_mask'] = metric_output.sky
         return output
-
     def _handle_sky_regions(
         self,
         output: Dict[str, torch.Tensor],
